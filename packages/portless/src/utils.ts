@@ -83,5 +83,15 @@ export function parseHostname(input: string): string {
     );
   }
 
+  // Validate per-label length (RFC 1035: max 63 characters per label)
+  const labels = name.split(".");
+  for (const label of labels) {
+    if (label.length > 63) {
+      throw new Error(
+        `Invalid hostname "${name}": label "${label}" exceeds 63-character DNS limit`
+      );
+    }
+  }
+
   return hostname;
 }

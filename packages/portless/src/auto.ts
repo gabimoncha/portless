@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -6,17 +7,39 @@ import * as path from "node:path";
 // Hostname sanitization
 // ---------------------------------------------------------------------------
 
+/** Maximum length of a single DNS label per RFC 1035. */
+const MAX_DNS_LABEL_LENGTH = 63;
+
+/**
+ * Truncate a DNS label to fit within the 63-character limit (RFC 1035).
+ * When truncation is needed, a short hash suffix is appended to preserve
+ * uniqueness (e.g. "very-long-name" → "very-long-na-a1b2c3").
+ * The hash is derived from the full (pre-truncated) label.
+ */
+export function truncateLabel(label: string): string {
+  if (label.length <= MAX_DNS_LABEL_LENGTH) return label;
+
+  // 6-char hex hash from the full label for uniqueness after truncation
+  const hash = createHash("sha256").update(label).digest("hex").slice(0, 6);
+  // Reserve space for "-" separator + 6-char hash = 7 chars
+  const maxPrefixLength = MAX_DNS_LABEL_LENGTH - 7;
+  const prefix = label.slice(0, maxPrefixLength).replace(/-+$/, "");
+  return `${prefix}-${hash}`;
+}
+
 /**
  * Sanitize a string for use as a .localhost hostname label.
  * Lowercases, replaces invalid characters with hyphens, collapses consecutive
- * hyphens, and trims leading/trailing hyphens.
+ * hyphens, trims leading/trailing hyphens, and enforces the 63-character DNS
+ * label limit (RFC 1035).
  */
 export function sanitizeForHostname(name: string): string {
-  return name
+  const sanitized = name
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
     .replace(/-{2,}/g, "-")
     .replace(/^-+|-+$/g, "");
+  return truncateLabel(sanitized);
 }
 
 // ---------------------------------------------------------------------------

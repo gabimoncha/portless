@@ -141,4 +141,19 @@ describe("parseHostname", () => {
   it("handles protocol with .localhost already present", () => {
     expect(parseHostname("https://test.localhost")).toBe("test.localhost");
   });
+
+  it("throws on label exceeding 63 characters", () => {
+    const longLabel = "a".repeat(64);
+    expect(() => parseHostname(longLabel)).toThrow("exceeds 63-character DNS limit");
+  });
+
+  it("accepts label at exactly 63 characters", () => {
+    const label63 = "a".repeat(63);
+    expect(parseHostname(label63)).toBe(`${label63}.localhost`);
+  });
+
+  it("throws when any label in multi-part hostname exceeds 63 characters", () => {
+    const longLabel = "a".repeat(64);
+    expect(() => parseHostname(`prefix.${longLabel}`)).toThrow("exceeds 63-character DNS limit");
+  });
 });

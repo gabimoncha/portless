@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { sanitizeForHostname, inferProjectName, detectWorktreePrefix } from "./auto.js";
+import {
+  sanitizeForHostname,
+  truncateLabel,
+  inferProjectName,
+  detectWorktreePrefix,
+} from "./auto.js";
 
 // ---------------------------------------------------------------------------
 // sanitizeForHostname
@@ -41,6 +46,64 @@ describe("sanitizeForHostname", () => {
 
   it("handles mixed case and underscores", () => {
     expect(sanitizeForHostname("My_Feature_Branch")).toBe("my-feature-branch");
+  });
+
+  it("truncates labels exceeding 63 characters", () => {
+    const longName = "a".repeat(80);
+    const result = sanitizeForHostname(longName);
+    expect(result.length).toBeLessThanOrEqual(63);
+  });
+
+  it("returns deterministic result for truncated labels", () => {
+    const longName = "a".repeat(80);
+    expect(sanitizeForHostname(longName)).toBe(sanitizeForHostname(longName));
+  });
+
+  it("preserves labels at exactly 63 characters", () => {
+    const name63 = "a".repeat(63);
+    expect(sanitizeForHostname(name63)).toBe(name63);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// truncateLabel
+// ---------------------------------------------------------------------------
+
+describe("truncateLabel", () => {
+  it("returns label unchanged when <= 63 characters", () => {
+    expect(truncateLabel("my-app")).toBe("my-app");
+    expect(truncateLabel("a".repeat(63))).toBe("a".repeat(63));
+  });
+
+  it("truncates label exceeding 63 characters", () => {
+    const result = truncateLabel("a".repeat(80));
+    expect(result.length).toBeLessThanOrEqual(63);
+  });
+
+  it("appends a hash suffix for uniqueness", () => {
+    const result = truncateLabel("a".repeat(80));
+    expect(result).toMatch(/-[a-f0-9]{6}$/);
+  });
+
+  it("produces different hashes for different inputs", () => {
+    const result1 = truncateLabel("a".repeat(80));
+    const result2 = truncateLabel("b".repeat(80));
+    expect(result1).not.toBe(result2);
+  });
+
+  it("is deterministic", () => {
+    const input =
+      "my-very-long-feature-branch-name-that-exceeds-the-dns-label-limit-by-quite-a-bit";
+    expect(truncateLabel(input)).toBe(truncateLabel(input));
+  });
+
+  it("does not end with a hyphen before the hash", () => {
+    // Construct input where truncation point falls on a hyphen
+    const input = "a".repeat(55) + "-" + "b".repeat(20);
+    const result = truncateLabel(input);
+    expect(result.length).toBeLessThanOrEqual(63);
+    // Should not have double hyphens from trailing-hyphen stripping + hash separator
+    expect(result).not.toMatch(/--/);
   });
 });
 
