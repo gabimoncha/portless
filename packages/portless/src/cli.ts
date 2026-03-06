@@ -635,6 +635,7 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
   ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
   ${chalk.cyan("portless run <cmd>")}               Infer name from project, run through proxy
+  ${chalk.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${chalk.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
   ${chalk.cyan("portless alias --remove <name>")}   Remove a static route
   ${chalk.cyan("portless list")}                    Show active routes
@@ -650,6 +651,7 @@ ${chalk.bold("Examples:")}
   portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
   portless run next dev               # -> http://<project>.localhost:1355
   portless run next dev               # in worktree -> http://<worktree>.<project>.localhost:1355
+  portless get backend                 # -> http://backend.localhost:1355 (for cross-service refs)
   # Wildcard subdomains: tenant.myapp.localhost also routes to myapp
 
 ${chalk.bold("In package.json:")}
@@ -716,9 +718,9 @@ ${chalk.bold("Skip portless:")}
   PORTLESS=skip pnpm dev        # Same as above
 
 ${chalk.bold("Reserved names:")}
-  run, alias, hosts, list, trust, proxy are subcommands and cannot be
-  used as app names directly. Use "portless run" to infer the name, or
-  "portless --name <name>" to force any name including reserved ones.
+  run, get, alias, hosts, list, trust, proxy are subcommands and cannot
+  be used as app names directly. Use "portless run" to infer the name,
+  or "portless --name <name>" to force any name including reserved ones.
 `);
   process.exit(0);
 }
@@ -750,6 +752,67 @@ async function handleList(): Promise<void> {
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
   listRoutes(store, port, tls);
+}
+
+async function handleGet(args: string[]): Promise<void> {
+  if (args[1] === "--help" || args[1] === "-h") {
+    console.log(`
+${chalk.bold("portless get")} - Print the URL for a service.
+
+${chalk.bold("Usage:")}
+  ${chalk.cyan("portless get <name>")}
+
+Constructs the URL using the same hostname and worktree logic as
+"portless run", then prints it to stdout. Useful for wiring services
+together:
+
+  BACKEND_URL=$(portless get backend)
+
+${chalk.bold("Options:")}
+  --no-worktree          Skip worktree prefix detection
+  --help, -h             Show this help
+
+${chalk.bold("Examples:")}
+  portless get backend                  # -> http://backend.localhost:1355
+  portless get backend                  # in worktree -> http://auth.backend.localhost:1355
+  portless get backend --no-worktree    # -> http://backend.localhost:1355 (skip worktree)
+`);
+    process.exit(0);
+  }
+
+  let skipWorktree = false;
+  const positional: string[] = [];
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--no-worktree") {
+      skipWorktree = true;
+    } else if (args[i].startsWith("-")) {
+      console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
+      console.error(chalk.blue("Known flags: --no-worktree, --help"));
+      process.exit(1);
+    } else {
+      positional.push(args[i]);
+    }
+  }
+
+  if (positional.length === 0) {
+    console.error(chalk.red("Error: Missing service name."));
+    console.error(chalk.blue("Usage:"));
+    console.error(chalk.cyan("  portless get <name>"));
+    console.error(chalk.blue("Example:"));
+    console.error(chalk.cyan("  portless get backend"));
+    process.exit(1);
+  }
+
+  const name = positional[0];
+  const worktree = skipWorktree ? null : detectWorktreePrefix();
+  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
+  const hostname = parseHostname(effectiveName);
+
+  const { port, tls } = await discoverState();
+  const url = formatUrl(hostname, port, tls);
+  // Print bare URL to stdout so it works in $(portless get <name>)
+  process.stdout.write(url + "\n");
 }
 
 async function handleAlias(args: string[]): Promise<void> {
@@ -1269,6 +1332,10 @@ async function main() {
     }
     if (args[0] === "list") {
       await handleList();
+      return;
+    }
+    if (args[0] === "get") {
+      await handleGet(args);
       return;
     }
     if (args[0] === "alias") {

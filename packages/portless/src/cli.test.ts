@@ -37,6 +37,7 @@ describe("CLI", () => {
       expect(stdout).toContain("Examples:");
       expect(stdout).toContain("proxy start");
       expect(stdout).toContain("portless run");
+      expect(stdout).toContain("portless get");
       expect(stdout).toContain("--port");
       expect(stdout).toContain("-p");
       expect(stdout).toContain("--foreground");
@@ -378,6 +379,57 @@ describe("CLI", () => {
     it("exits 1 for unknown proxy subcommand", () => {
       const { status } = run(["proxy", "typo"]);
       expect(status).toBe(1);
+    });
+  });
+
+  describe("get subcommand", () => {
+    it("prints help with --help", () => {
+      const { status, stdout } = run(["get", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless get");
+      expect(stdout).toContain("--no-worktree");
+    });
+
+    it("prints help with -h", () => {
+      const { status, stdout } = run(["get", "-h"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless get");
+    });
+
+    it("exits 1 with usage when no name given", () => {
+      const { status, stderr } = run(["get"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Missing service name");
+    });
+
+    it("prints URL for a given service name", () => {
+      const { status, stdout } = run(["get", "backend"]);
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
+    });
+
+    it("prints URL for a dotted service name", () => {
+      const { status, stdout } = run(["get", "api.backend"]);
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(/^https?:\/\/api\.backend\.localhost(:\d+)?$/);
+    });
+
+    it("rejects unknown flags", () => {
+      const { status, stderr } = run(["get", "--typo", "backend"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Unknown flag");
+    });
+
+    it("accepts --no-worktree flag", () => {
+      const { status, stdout } = run(["get", "--no-worktree", "backend"]);
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
+    });
+
+    it("exits 1 for invalid hostname", () => {
+      const { status, stderr } = run(["get", "my@app"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid hostname");
     });
   });
 
