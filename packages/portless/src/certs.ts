@@ -197,6 +197,18 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   );
 
   // Sign with CA
+  // Use -CAserial with an explicit path instead of -CAcreateserial.
+  // -CAcreateserial derives the .srl path by stripping the CA cert's file
+  // extension, but some OpenSSL/LibreSSL versions use the *last dot in the
+  // full path* -- so a dot in $HOME (e.g. /Users/ashish.jaiswal) causes it
+  // to write "/Users/ashish.srl" instead of the intended location.
+  const srlPath = path.join(stateDir, "ca.srl");
+  if (!fileExists(srlPath)) {
+    fs.writeFileSync(
+      srlPath,
+      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
+    );
+  }
   openssl([
     "x509",
     "-req",
@@ -207,7 +219,8 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
     caCertPath,
     "-CAkey",
     caKeyPath,
-    "-CAcreateserial",
+    "-CAserial",
+    srlPath,
     "-out",
     serverCertPath,
     "-days",
@@ -530,6 +543,15 @@ async function generateHostCertAsync(
     ].join("\n") + "\n"
   );
 
+  // Use -CAserial with an explicit path instead of -CAcreateserial to avoid
+  // incorrect .srl path resolution when $HOME contains a dot (see #152).
+  const srlPath = path.join(stateDir, "ca.srl");
+  if (!fs.existsSync(srlPath)) {
+    await fs.promises.writeFile(
+      srlPath,
+      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
+    );
+  }
   await opensslAsync([
     "x509",
     "-req",
@@ -540,7 +562,8 @@ async function generateHostCertAsync(
     caCertPath,
     "-CAkey",
     caKeyPath,
-    "-CAcreateserial",
+    "-CAserial",
+    srlPath,
     "-out",
     certPath,
     "-days",

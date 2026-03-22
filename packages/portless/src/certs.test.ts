@@ -89,6 +89,25 @@ describe("ensureCerts", () => {
     expect(getCertSignatureAlgo(result.certPath)).toContain("sha256");
   });
 
+  it("generates certs when state dir path contains a dot (#152)", () => {
+    // Regression: -CAcreateserial derived .srl path using the last dot in the
+    // full path, so a dot in $HOME (e.g. /Users/ashish.jaiswal) caused
+    // "Permission denied" when openssl tried to write outside the state dir.
+    const dotDir = path.join(tmpDir, "user.name", ".portless");
+    fs.mkdirSync(dotDir, { recursive: true });
+
+    const result = ensureCerts(dotDir);
+
+    expect(result.caGenerated).toBe(true);
+    expect(fs.existsSync(result.certPath)).toBe(true);
+    expect(fs.existsSync(result.keyPath)).toBe(true);
+    expect(fs.existsSync(result.caPath)).toBe(true);
+
+    // The .srl file must be inside the state dir, not elsewhere
+    const srlPath = path.join(dotDir, "ca.srl");
+    expect(fs.existsSync(srlPath)).toBe(true);
+  });
+
   it("reuses existing certs on second call", () => {
     const first = ensureCerts(tmpDir);
     expect(first.caGenerated).toBe(true);
