@@ -21,6 +21,23 @@ export const DEFAULT_PROXY_PORT = 1355;
 /** Ports below this threshold require root/sudo to bind (Unix only). */
 export const PRIVILEGED_PORT_THRESHOLD = 1024;
 
+/** Internal env var used to preserve an auto-detected LAN IP across daemonization. */
+export const INTERNAL_LAN_IP_ENV = "PORTLESS_INTERNAL_LAN_IP";
+
+/** Internal-only flag used to pass an auto-detected LAN IP through re-exec. */
+export const INTERNAL_LAN_IP_FLAG = "--lan-ip-auto";
+
+export interface SavedProxyConfig {
+  useHttps: boolean;
+  customCertPath: string | null;
+  customKeyPath: string | null;
+  lanMode: boolean;
+  lanIp: string | null;
+  lanIpExplicit: boolean;
+  tld: string;
+  useWildcard: boolean;
+}
+
 /**
  * System-wide state directory (used when proxy needs sudo on Unix).
  * Hardcoded to /tmp/portless rather than os.tmpdir() because macOS returns
@@ -194,6 +211,9 @@ export function validateTld(tld: string): string | null {
 /** Name of the file that stores the proxy's active TLD. */
 const TLD_FILE = "proxy.tld";
 
+/** Name of the file that stores the last successful proxy config. */
+const SAVED_PROXY_CONFIG_FILE = "proxy.config.json";
+
 /** Read the TLD from a state directory. Returns DEFAULT_TLD if absent. */
 export function readTldFromDir(dir: string): string {
   try {
@@ -216,6 +236,52 @@ export function writeTldFile(dir: string, tld: string): void {
   } else {
     fs.writeFileSync(filePath, tld, { mode: 0o644 });
   }
+}
+
+/** Return the path to the persisted proxy config file. */
+export function savedProxyConfigPath(dir: string): string {
+  return path.join(dir, SAVED_PROXY_CONFIG_FILE);
+}
+
+function isSavedProxyConfig(value: unknown): value is SavedProxyConfig {
+  if (!value || typeof value !== "object") return false;
+  const config = value as Record<string, unknown>;
+  return (
+    typeof config.useHttps === "boolean" &&
+    (typeof config.customCertPath === "string" || config.customCertPath === null) &&
+    (typeof config.customKeyPath === "string" || config.customKeyPath === null) &&
+    typeof config.lanMode === "boolean" &&
+    (typeof config.lanIp === "string" || config.lanIp === null) &&
+    typeof config.lanIpExplicit === "boolean" &&
+    typeof config.tld === "string" &&
+    typeof config.useWildcard === "boolean"
+  );
+}
+
+/** Read the last successful proxy config from a state directory. */
+export function readSavedProxyConfig(dir: string): SavedProxyConfig | null {
+  try {
+    const raw = fs.readFileSync(savedProxyConfigPath(dir), "utf-8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isSavedProxyConfig(parsed)) return null;
+    const tldErr = validateTld(parsed.tld);
+    if (tldErr) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the last successful proxy config for future starts. */
+export function writeSavedProxyConfig(dir: string, config: SavedProxyConfig): void {
+  const normalized: SavedProxyConfig = {
+    ...config,
+    customCertPath: config.customCertPath ? path.resolve(config.customCertPath) : null,
+    customKeyPath: config.customKeyPath ? path.resolve(config.customKeyPath) : null,
+  };
+  fs.writeFileSync(savedProxyConfigPath(dir), JSON.stringify(normalized, null, 2) + "\n", {
+    mode: 0o644,
+  });
 }
 
 /**
@@ -255,6 +321,58 @@ export function isLanEnvEnabled(): boolean {
   return val === "1" || val === "true";
 }
 
+export function buildProxyStartConfig(options: {
+  useHttps: boolean;
+  customCertPath?: string | null;
+  customKeyPath?: string | null;
+  lanMode: boolean;
+  lanIp?: string | null;
+  lanIpExplicit?: boolean;
+  tld: string;
+  useWildcard?: boolean;
+  foreground?: boolean;
+  includePort?: boolean;
+  proxyPort?: number;
+}): { effectiveTld: string; args: string[] } {
+  const effectiveTld = options.lanMode ? "local" : options.tld;
+  const args: string[] = [];
+
+  if (options.foreground) {
+    args.push("--foreground");
+  }
+
+  if (options.includePort && options.proxyPort !== undefined) {
+    args.push("--port", options.proxyPort.toString());
+  }
+
+  if (options.useHttps) {
+    if (options.customCertPath && options.customKeyPath) {
+      args.push("--cert", options.customCertPath, "--key", options.customKeyPath);
+    } else {
+      args.push("--https");
+    }
+  }
+
+  if (options.lanMode) {
+    args.push("--lan");
+    if (options.lanIp) {
+      if (options.lanIpExplicit) {
+        args.push("--ip", options.lanIp);
+      } else {
+        args.push(INTERNAL_LAN_IP_FLAG, options.lanIp);
+      }
+    }
+  } else if (effectiveTld !== DEFAULT_TLD) {
+    args.push("--tld", effectiveTld);
+  }
+
+  if (options.useWildcard) {
+    args.push("--wildcard");
+  }
+
+  return { effectiveTld, args };
+}
+
 /**
  * Discover the active proxy's state directory, port, TLS mode, TLD, and LAN IP.
  * Checks the user-level dir first, then the system-level dir.
@@ -271,9 +389,17 @@ export async function discoverState(): Promise<{
   if (process.env.PORTLESS_STATE_DIR) {
     const dir = process.env.PORTLESS_STATE_DIR;
     const port = readPortFromDir(dir) ?? getDefaultPort();
-    const tls = readTlsMarker(dir);
-    const tld = readTldFromDir(dir);
-    const lanIp = readLanMarker(dir);
+    if (await isProxyRunning(port)) {
+      const tls = readTlsMarker(dir);
+      const tld = readTldFromDir(dir);
+      const lanIp = readLanMarker(dir);
+      return { dir, port, tls, tld, lanIp };
+    }
+
+    const savedConfig = readSavedProxyConfig(dir);
+    const tls = savedConfig?.useHttps || false;
+    const tld = savedConfig?.tld || getDefaultTld();
+    const lanIp = savedConfig?.lanIpExplicit ? savedConfig.lanIp : null;
     return { dir, port, tls, tld, lanIp };
   }
 
@@ -317,12 +443,14 @@ export async function discoverState(): Promise<{
     }
   }
 
+  const dir = resolveStateDir(defaultPort);
+  const savedConfig = readSavedProxyConfig(dir);
   return {
-    dir: resolveStateDir(defaultPort),
+    dir,
     port: defaultPort,
-    tls: false,
-    tld: getDefaultTld(),
-    lanIp: null,
+    tls: savedConfig?.useHttps || false,
+    tld: savedConfig?.tld || getDefaultTld(),
+    lanIp: savedConfig?.lanIpExplicit ? savedConfig.lanIp : null,
   };
 }
 
@@ -683,9 +811,10 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
  *
  * Note: Expo's `--host` flag is *not* a bind address (it is a connection mode:
- * lan|tunnel|localhost). Defaulting to localhost keeps the dev server local unless
- * LAN mode is explicitly requested (PORTLESS_LAN=1), in which case we revert to lan
- * so device discovery still works.
+ * lan|tunnel|localhost). In LAN mode we skip `--host` entirely — Expo defaults
+ * to LAN already and injecting the flag alongside HOST=127.0.0.1 causes Metro's
+ * HMR WebSocket to degrade. Outside LAN mode, `--host localhost` keeps the
+ * server local.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): void {
   const basename = findFrameworkBasename(commandArgs);
@@ -701,8 +830,11 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
   }
 
   if (!commandArgs.includes("--host")) {
-    const expoLanMode = basename === "expo" && isLanEnvEnabled();
-    const hostValue = basename === "expo" ? (expoLanMode ? "lan" : "localhost") : "127.0.0.1";
+    // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
+    // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
+    const isExpoLan = basename === "expo" && isLanEnvEnabled();
+    if (isExpoLan) return;
+    const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }
 }

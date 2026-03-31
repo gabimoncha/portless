@@ -66,7 +66,7 @@ function isCertValid(certPath: string): boolean {
 function isCertSansComplete(certPath: string): boolean {
   try {
     const text = openssl(["x509", "-in", certPath, "-noout", "-text"]);
-    return text.includes("*.local");
+    return /DNS:\*\.local\b/.test(text);
   } catch {
     return false;
   }
@@ -547,6 +547,7 @@ async function generateHostCertAsync(
     // Add a wildcard for sibling subdomains at the same level
     sans.push(`DNS:*.${parts.slice(1).join(".")}`);
   }
+
   await fs.promises.writeFile(
     extPath,
     [

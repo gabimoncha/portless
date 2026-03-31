@@ -5,21 +5,29 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  buildProxyStartConfig,
   DEFAULT_PROXY_PORT,
   DEFAULT_TLD,
+  INTERNAL_LAN_IP_FLAG,
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
+  type SavedProxyConfig,
   SYSTEM_STATE_DIR,
   USER_STATE_DIR,
+  discoverState,
   findFreePort,
   getDefaultPort,
   getDefaultTld,
   injectFrameworkFlags,
   isProxyRunning,
   parsePidFromNetstat,
+  readLanMarker,
+  readSavedProxyConfig,
   readTldFromDir,
   resolveStateDir,
+  writeSavedProxyConfig,
   validateTld,
+  writeLanMarker,
   writeTldFile,
 } from "./cli-utils.js";
 
@@ -331,13 +339,13 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "localhost"]);
   });
 
-  it("injects --host lan for expo when PORTLESS_LAN is set", () => {
+  it("skips --host for expo in LAN mode (Metro defaults to LAN)", () => {
     const prev = process.env.PORTLESS_LAN;
     process.env.PORTLESS_LAN = "1";
     try {
       const args = ["expo", "start"];
       injectFrameworkFlags(args, 4567);
-      expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "lan"]);
+      expect(args).toEqual(["expo", "start", "--port", "4567"]);
     } finally {
       if (prev === undefined) delete process.env.PORTLESS_LAN;
       else process.env.PORTLESS_LAN = prev;
@@ -664,6 +672,164 @@ describe("getDefaultTld", () => {
   it("returns DEFAULT_TLD when PORTLESS_TLD is empty", () => {
     process.env.PORTLESS_TLD = "";
     expect(getDefaultTld()).toBe(DEFAULT_TLD);
+  });
+});
+
+describe("buildProxyStartConfig", () => {
+  it("forces .local and keeps explicit --ip in LAN mode", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: true,
+        lanMode: true,
+        lanIp: "192.168.1.42",
+        lanIpExplicit: true,
+        tld: "test",
+        useWildcard: true,
+        foreground: true,
+        includePort: true,
+        proxyPort: 8080,
+      })
+    ).toEqual({
+      effectiveTld: "local",
+      args: [
+        "--foreground",
+        "--port",
+        "8080",
+        "--https",
+        "--lan",
+        "--ip",
+        "192.168.1.42",
+        "--wildcard",
+      ],
+    });
+  });
+
+  it("passes auto-detected LAN IP through an internal flag", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: false,
+        lanMode: true,
+        lanIp: "192.168.1.42",
+        lanIpExplicit: false,
+        tld: "localhost",
+      })
+    ).toEqual({
+      effectiveTld: "local",
+      args: ["--lan", INTERNAL_LAN_IP_FLAG, "192.168.1.42"],
+    });
+  });
+
+  it("keeps custom TLDs outside LAN mode", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: false,
+        lanMode: false,
+        tld: "test",
+      })
+    ).toEqual({
+      effectiveTld: "test",
+      args: ["--tld", "test"],
+    });
+  });
+});
+
+describe("readLanMarker / writeLanMarker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-lan-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("writes and reads a LAN IP", () => {
+    writeLanMarker(tmpDir, "192.168.1.42");
+    expect(readLanMarker(tmpDir)).toBe("192.168.1.42");
+  });
+
+  it("removes the file when writing null", () => {
+    writeLanMarker(tmpDir, "192.168.1.42");
+    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(true);
+
+    writeLanMarker(tmpDir, null);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
+    expect(readLanMarker(tmpDir)).toBeNull();
+  });
+
+  it("propagates the LAN marker through discoverState", async () => {
+    const prevStateDir = process.env.PORTLESS_STATE_DIR;
+    try {
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+      writeTldFile(tmpDir, "local");
+      writeLanMarker(tmpDir, "192.168.1.42");
+      process.env.PORTLESS_STATE_DIR = tmpDir;
+
+      await expect(discoverState()).resolves.toMatchObject({
+        dir: tmpDir,
+        port: 1355,
+        tld: "local",
+        lanIp: "192.168.1.42",
+      });
+    } finally {
+      if (prevStateDir === undefined) {
+        delete process.env.PORTLESS_STATE_DIR;
+      } else {
+        process.env.PORTLESS_STATE_DIR = prevStateDir;
+      }
+    }
+  });
+});
+
+describe("readSavedProxyConfig / writeSavedProxyConfig", () => {
+  let tmpDir: string;
+
+  const savedConfig: SavedProxyConfig = {
+    useHttps: true,
+    customCertPath: null,
+    customKeyPath: null,
+    lanMode: true,
+    lanIp: null,
+    lanIpExplicit: false,
+    tld: "local",
+    useWildcard: true,
+  };
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-saved-config-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("writes and reads the saved proxy config", () => {
+    writeSavedProxyConfig(tmpDir, savedConfig);
+    expect(readSavedProxyConfig(tmpDir)).toEqual(savedConfig);
+  });
+
+  it("uses the saved config in discoverState when the proxy is stopped", async () => {
+    const prevStateDir = process.env.PORTLESS_STATE_DIR;
+    try {
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "19876");
+      writeSavedProxyConfig(tmpDir, savedConfig);
+      process.env.PORTLESS_STATE_DIR = tmpDir;
+
+      await expect(discoverState()).resolves.toMatchObject({
+        dir: tmpDir,
+        port: 19876,
+        tls: true,
+        tld: "local",
+        lanIp: null,
+      });
+    } finally {
+      if (prevStateDir === undefined) {
+        delete process.env.PORTLESS_STATE_DIR;
+      } else {
+        process.env.PORTLESS_STATE_DIR = prevStateDir;
+      }
+    }
   });
 });
 

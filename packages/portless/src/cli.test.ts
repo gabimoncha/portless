@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,56 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
     stdout: result.stdout,
     stderr: result.stderr,
   };
+}
+
+function writeExpoShim(dir: string): void {
+  const captureScriptPath = path.join(dir, "capture-expo.js");
+  fs.writeFileSync(
+    captureScriptPath,
+    [
+      'const fs = require("node:fs");',
+      "const capturePath = process.env.PORTLESS_TEST_CAPTURE_FILE;",
+      "const payload = {",
+      "  args: process.argv.slice(2),",
+      "  env: {",
+      "    PORT: process.env.PORT,",
+      "    HOST: process.env.HOST,",
+      "    PORTLESS_LAN: process.env.PORTLESS_LAN,",
+      "    PORTLESS_URL: process.env.PORTLESS_URL,",
+      "  },",
+      "};",
+      "fs.writeFileSync(capturePath, JSON.stringify(payload));",
+    ].join("\n") + "\n"
+  );
+
+  if (process.platform === "win32") {
+    fs.writeFileSync(
+      path.join(dir, "expo.cmd"),
+      `@echo off\r\n"${process.execPath}" "${captureScriptPath}" %*\r\n`
+    );
+    return;
+  }
+
+  const shimPath = path.join(dir, "expo");
+  fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`);
+  fs.chmodSync(shimPath, 0o755);
+}
+
+async function getFreePort(): Promise<number> {
+  const server = http.createServer();
+  try {
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") {
+          resolve(addr.port);
+        }
+      });
+    });
+    return port;
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 }
 
 describe("CLI", () => {
@@ -381,6 +432,275 @@ describe("CLI", () => {
     it("exits 1 for unknown proxy subcommand", () => {
       const { status } = run(["proxy", "typo"]);
       expect(status).toBe(1);
+    });
+
+    it("warns when a running proxy uses a different explicit config", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-running-proxy-"));
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(
+          path.join(tmpDir, "proxy.config.json"),
+          JSON.stringify({
+            useHttps: false,
+            customCertPath: null,
+            customKeyPath: null,
+            lanMode: false,
+            lanIp: null,
+            lanIpExplicit: false,
+            tld: "localhost",
+            useWildcard: false,
+          }) + "\n"
+        );
+
+        const { status, stderr } = run(["proxy", "start", "--lan"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+
+        expect(status).toBe(1);
+        expect(stderr).toContain("Proxy is already running on port");
+        expect(stderr).toContain("requested LAN mode");
+        expect(stderr).toContain("portless proxy stop");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("sticky proxy config", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-sticky-config-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("reuses the saved proxy config when auto-starting from run", async () => {
+      const proxyPort = await getFreePort();
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: proxyPort.toString(),
+      };
+
+      fs.writeFileSync(
+        path.join(tmpDir, "proxy.config.json"),
+        JSON.stringify({
+          useHttps: false,
+          customCertPath: null,
+          customKeyPath: null,
+          lanMode: false,
+          lanIp: null,
+          lanIpExplicit: false,
+          tld: "test",
+          useWildcard: false,
+        }) + "\n"
+      );
+
+      try {
+        const { status, stdout } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        expect(status).toBe(0);
+        expect(stdout).toContain(`http://myapp.test:${proxyPort}`);
+      } finally {
+        run(["proxy", "stop"], { env });
+      }
+    });
+
+    it("explicit --lan overrides a saved non-LAN config", async () => {
+      const proxyPort = await getFreePort();
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: proxyPort.toString(),
+      };
+
+      fs.writeFileSync(
+        path.join(tmpDir, "proxy.config.json"),
+        JSON.stringify({
+          useHttps: false,
+          customCertPath: null,
+          customKeyPath: null,
+          lanMode: false,
+          lanIp: null,
+          lanIpExplicit: false,
+          tld: "test",
+          useWildcard: false,
+        }) + "\n"
+      );
+
+      try {
+        const { status, stdout } = run(
+          ["--lan", "--ip", "192.168.1.42", "myapp", "node", "-e", "process.exit(0)"],
+          { env }
+        );
+        expect(status).toBe(0);
+        // LAN mode forces .local TLD
+        expect(stdout).toContain(`http://myapp.local:${proxyPort}`);
+      } finally {
+        run(["proxy", "stop"], { env });
+      }
+    });
+
+    it("no explicit overrides reuses saved config unchanged", async () => {
+      const proxyPort = await getFreePort();
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: proxyPort.toString(),
+      };
+
+      fs.writeFileSync(
+        path.join(tmpDir, "proxy.config.json"),
+        JSON.stringify({
+          useHttps: false,
+          customCertPath: null,
+          customKeyPath: null,
+          lanMode: false,
+          lanIp: null,
+          lanIpExplicit: false,
+          tld: "test",
+          useWildcard: true,
+        }) + "\n"
+      );
+
+      try {
+        const { status, stdout } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        expect(status).toBe(0);
+        expect(stdout).toContain(`http://myapp.test:${proxyPort}`);
+      } finally {
+        run(["proxy", "stop"], { env });
+      }
+    });
+  });
+
+  describe("LAN mode", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-lan-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it.skipIf(process.platform === "win32")("warns when --lan and --tld are both provided", () => {
+      // Use an empty PATH so the mDNS check fails early, causing the
+      // process to exit without needing a running proxy server (spawnSync
+      // blocks the parent event loop, preventing a fake server from responding).
+      const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "portless-empty-path-"));
+      try {
+        const { status, stderr } = run(
+          ["proxy", "start", "--lan", "--tld", "test", "--ip", "192.168.1.42"],
+          {
+            env: {
+              PATH: emptyPath,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_PORT: "19876",
+            },
+          }
+        );
+        expect(status).toBe(1);
+        expect(stderr).toContain("--lan forces .local TLD");
+        expect(stderr).toContain("Ignoring --tld test");
+      } finally {
+        fs.rmSync(emptyPath, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "fails early when the mDNS publisher binary is missing",
+      () => {
+        const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "portless-empty-path-"));
+        try {
+          const { status, stderr, stdout } = run(
+            ["proxy", "start", "--foreground", "--lan", "--ip", "192.168.1.42"],
+            {
+              env: {
+                PATH: emptyPath,
+                PORTLESS_PORT: "19876",
+                PORTLESS_STATE_DIR: tmpDir,
+              },
+            }
+          );
+
+          expect(status).toBe(1);
+          expect(stderr).toContain("LAN mode requires mDNS publishing");
+          expect(stderr).toContain(
+            process.platform === "linux" ? "avahi-publish-address not found" : "dns-sd not found"
+          );
+          expect(stdout).not.toContain("LAN mode active");
+        } finally {
+          fs.rmSync(emptyPath, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it("propagates the LAN marker into expo child commands", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
+        fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
+        writeExpoShim(shimDir);
+
+        const { status } = run(["run", "--name", "mobile", "--app-port", "4567", "expo", "start"], {
+          env: {
+            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_TEST_CAPTURE_FILE: capturePath,
+          },
+        });
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        // In LAN mode, Expo gets no --host flag (Metro defaults to LAN)
+        // and no HOST env var (avoids conflict with Metro's LAN networking)
+        expect(capture.args).toEqual(["start", "--port", "4567"]);
+        expect(capture.env).toMatchObject({
+          PORT: "4567",
+          PORTLESS_LAN: "1",
+          PORTLESS_URL: `http://mobile.local:${proxyPort}`,
+        });
+        expect(capture.env.HOST).toBeUndefined();
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
     });
   });
 

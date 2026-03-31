@@ -1,53 +1,141 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import * as os from "node:os";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { lanNetwork } = require("lan-network") as typeof import("lan-network");
+
+type MdnsPublisher = {
+  command: string;
+  probeArgs: string[];
+  missingReason: string;
+  buildArgs: (fqdn: string, name: string, port: number, ip: string) => string[];
+};
+
+type LanIpMonitorOptions = {
+  initialIp: string | null;
+  intervalMs?: number;
+  resolveIp?: () => Promise<string | null>;
+  onChange: (nextIp: string | null, previousIp: string | null) => void;
+  onError?: (error: unknown) => void;
+};
 
 /** Map of hostname -> running dns-sd/avahi child process. */
 const activePublishers = new Map<string, ChildProcess>();
 
-/**
- * Detect the local network IP address.
- * Returns the first non-internal IPv4 address, preferring common
- * interface names (en0, eth0, wlan0). Returns null if offline.
- */
-export function getLocalNetworkIp(): string | null {
-  const interfaces = os.networkInterfaces();
-  const preferred = ["en0", "eth0", "wlan0", "Wi-Fi"];
+/** Polling interval (ms) for refreshing the auto-detected LAN IP. */
+export const LAN_IP_POLL_INTERVAL_MS = 5000;
 
-  // Check preferred interfaces first
-  for (const name of preferred) {
-    const addrs = interfaces[name];
-    if (!addrs) continue;
-    for (const addr of addrs) {
-      if (addr.family === "IPv4" && !addr.internal) {
-        return addr.address;
-      }
-    }
+function getMdnsPublisher(): MdnsPublisher | null {
+  if (process.platform === "darwin") {
+    return {
+      command: "dns-sd",
+      probeArgs: ["-h"],
+      missingReason: "dns-sd not found",
+      buildArgs: (fqdn, name, port, ip) => [
+        "-P",
+        name,
+        "_http._tcp",
+        "local",
+        port.toString(),
+        fqdn,
+        ip,
+      ],
+    };
   }
 
-  // Fall back to any non-internal IPv4
-  for (const addrs of Object.values(interfaces)) {
-    if (!addrs) continue;
-    for (const addr of addrs) {
-      if (addr.family === "IPv4" && !addr.internal) {
-        return addr.address;
-      }
-    }
+  if (process.platform === "linux") {
+    return {
+      command: "avahi-publish-address",
+      probeArgs: ["--help"],
+      missingReason:
+        "avahi-publish-address not found. Install avahi-utils: sudo apt install avahi-utils",
+      buildArgs: (fqdn, _name, _port, ip) => ["-R", fqdn, ip],
+    };
   }
 
   return null;
+}
+
+function hasCommand(command: string, probeArgs: string[]): boolean {
+  const result = spawnSync(command, probeArgs, {
+    stdio: "ignore",
+    timeout: 1000,
+    windowsHide: true,
+  });
+  return (result.error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT";
+}
+
+/**
+ * Detect the local network IP address.
+ * Returns the default LAN IPv4 address, or null if the machine appears offline.
+ */
+export async function getLocalNetworkIp(): Promise<string | null> {
+  try {
+    const assignment = await lanNetwork();
+    if (assignment.internal || assignment.address === "127.0.0.1") {
+      return null;
+    }
+    return assignment.address;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Poll the default LAN IP and notify when it changes.
+ *
+ * Used only for auto-detected LAN mode so the daemon can follow Wi-Fi/IP
+ * changes without changing the explicit `--ip` contract.
+ */
+export function startLanIpMonitor(options: LanIpMonitorOptions): { stop: () => void } {
+  const resolveIp = options.resolveIp ?? getLocalNetworkIp;
+  let currentIp = options.initialIp;
+  let stopped = false;
+  let polling = false;
+
+  const poll = async () => {
+    if (stopped || polling) return;
+    polling = true;
+    try {
+      const nextIp = await resolveIp();
+      if (stopped || nextIp === currentIp) return;
+      const previousIp = currentIp;
+      currentIp = nextIp;
+      options.onChange(nextIp, previousIp);
+    } catch (error) {
+      options.onError?.(error);
+    } finally {
+      polling = false;
+    }
+  };
+
+  const timer = setInterval(() => {
+    void poll();
+  }, options.intervalMs ?? LAN_IP_POLL_INTERVAL_MS);
+  timer.unref?.();
+
+  return {
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
 }
 
 /**
  * Check if mDNS publishing is supported on the current platform.
  */
 export function isMdnsSupported(): { supported: boolean; reason?: string } {
-  if (process.platform === "darwin") {
-    return { supported: true };
+  const publisher = getMdnsPublisher();
+  if (!publisher) {
+    return { supported: false, reason: "mDNS publishing is not supported on this platform" };
   }
-  if (process.platform === "linux") {
-    return { supported: true };
+
+  if (!hasCommand(publisher.command, publisher.probeArgs)) {
+    return { supported: false, reason: publisher.missingReason };
   }
-  return { supported: false, reason: "mDNS publishing is not supported on this platform" };
+
+  return { supported: true };
 }
 
 /**
@@ -80,31 +168,21 @@ export function publish(
 
   const fqdn = hostname.endsWith(".local") ? hostname : `${hostname}.local`;
   const name = serviceName(fqdn);
-  let child: ChildProcess;
-
-  if (process.platform === "darwin") {
-    // dns-sd -P <name> <type> <domain> <port> <host> <ip>
-    child = spawn("dns-sd", ["-P", name, "_http._tcp", "local", port.toString(), fqdn, ip], {
-      stdio: "ignore",
-      detached: false,
-    });
-  } else if (process.platform === "linux") {
-    // avahi-publish-address -R allows re-registration on conflict
-    child = spawn("avahi-publish-address", ["-R", fqdn, ip], {
-      stdio: "ignore",
-      detached: false,
-    });
-  } else {
+  const publisher = getMdnsPublisher();
+  if (!publisher) {
     return;
   }
+
+  const child = spawn(publisher.command, publisher.buildArgs(fqdn, name, port, ip), {
+    stdio: "ignore",
+    detached: false,
+  });
 
   child.on("error", (err) => {
     activePublishers.delete(hostname);
     const msg =
       (err as NodeJS.ErrnoException).code === "ENOENT"
-        ? process.platform === "linux"
-          ? "avahi-publish-address not found. Install avahi-utils: sudo apt install avahi-utils"
-          : "dns-sd not found"
+        ? publisher.missingReason
         : `mDNS publish error for ${hostname}: ${err.message}`;
     onError?.(msg);
   });
@@ -130,10 +208,10 @@ export function unpublish(hostname: string): void {
  * Kill all active mDNS publisher processes. Called during proxy shutdown.
  */
 export function cleanupAll(): void {
-  for (const [hostname, child] of activePublishers) {
+  for (const child of activePublishers.values()) {
     child.kill("SIGTERM");
-    activePublishers.delete(hostname);
   }
+  activePublishers.clear();
 }
 
 /**

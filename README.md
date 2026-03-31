@@ -29,7 +29,7 @@ portless myapp next dev
 # -> http://myapp.localhost:1355
 ```
 
-The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
+The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
 
 ## Use in package.json
 
@@ -139,7 +139,9 @@ portless proxy start --lan --https
 portless proxy start --lan --ip 192.168.1.42
 ```
 
-`--lan` switches the proxy to mDNS discovery: services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
+`--lan` switches the proxy to mDNS discovery: services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP and follows Wi-Fi/IP changes automatically, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
+
+Portless also remembers the last successful proxy config. If you stop a LAN proxy and start it again, it stays in LAN mode unless you explicitly change the settings. If a proxy is already running with different explicit settings, portless warns and asks you to stop it first.
 
 LAN mode depends on the system mDNS tools that portless already spawns: macOS ships with `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s equivalent). If the command is missing or your network isn’t reachable, `portless proxy start --lan` prints the relevant error and exits.
 
@@ -154,7 +156,7 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
   };
   ```
 
-- **Expo** exposes the same dev server on your network when you run `npx expo start --lan` (alias for `--host lan`). Use that flag when testing from Expo Go or development builds on real devices so the QR code points to the LAN IP rather than a localhost-only address.
+- **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`.
 
 ## Commands
 
@@ -188,7 +190,7 @@ portless proxy stop              # Stop the proxy
 -p, --port <number>              Port for the proxy (default: 1355)
 --https                          Enable HTTP/2 + TLS with auto-generated certs
 --lan                            Enable LAN mode (mDNS .local for real devices)
---ip <address>                   Override auto-detected LAN IP (use with --lan)
+--ip <address>                   Pin a specific LAN IP (disables auto-follow; use with --lan)
 --cert <path>                    Use a custom TLS certificate (implies --https)
 --key <path>                     Use a custom TLS private key (implies --https)
 --no-tls                         Disable HTTPS (overrides PORTLESS_HTTPS)
