@@ -22,7 +22,6 @@ import {
   RISKY_TLDS,
   WAIT_FOR_PROXY_INTERVAL_MS,
   WAIT_FOR_PROXY_MAX_ATTEMPTS,
-  type SavedProxyConfig,
   discoverState,
   findFreePort,
   findPidOnPort,
@@ -37,16 +36,13 @@ import {
   isWindows,
   prompt,
   readLanMarker,
-  readSavedProxyConfig,
   readTldFromDir,
   readTlsMarker,
   resolveStateDir,
-  savedProxyConfigPath,
   spawnCommand,
   validateTld,
   waitForProxy,
   writeLanMarker,
-  writeSavedProxyConfig,
   writeTldFile,
   writeTlsMarker,
 } from "./cli-utils.js";
@@ -89,21 +85,32 @@ type ProxyConfigExplicitness = {
   useWildcard: boolean;
 };
 
-function defaultSavedProxyConfig(tld: string, useHttps: boolean): SavedProxyConfig {
+type ProxyConfig = {
+  useHttps: boolean;
+  customCertPath: string | null;
+  customKeyPath: string | null;
+  lanMode: boolean;
+  lanIp: string | null;
+  lanIpExplicit: boolean;
+  tld: string;
+  useWildcard: boolean;
+};
+
+function defaultProxyConfig(tld: string, useHttps: boolean, lanMode: boolean): ProxyConfig {
   return {
     useHttps,
     customCertPath: null,
     customKeyPath: null,
-    lanMode: false,
+    lanMode,
     lanIp: null,
     lanIpExplicit: false,
-    tld,
+    tld: lanMode ? "local" : tld,
     useWildcard: false,
   };
 }
 
-function resolveSavedProxyConfig(options: {
-  savedConfig: SavedProxyConfig | null;
+function resolveProxyConfig(options: {
+  persistedLanMode: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTld: string;
   useHttps: boolean;
@@ -113,10 +120,12 @@ function resolveSavedProxyConfig(options: {
   lanIp: string | null;
   tld: string;
   useWildcard: boolean;
-}): SavedProxyConfig {
-  const config = options.savedConfig
-    ? { ...options.savedConfig }
-    : defaultSavedProxyConfig(options.defaultTld, options.useHttps);
+}): ProxyConfig {
+  const config = defaultProxyConfig(
+    options.defaultTld,
+    options.useHttps,
+    options.explicit.lanMode ? options.lanMode : options.persistedLanMode
+  );
 
   if (options.explicit.useHttps) {
     config.useHttps = options.useHttps;
@@ -143,7 +152,7 @@ function resolveSavedProxyConfig(options: {
     }
   }
 
-  if (options.explicit.lanIp) {
+  if (options.explicit.lanIp && options.lanIp) {
     config.lanMode = true;
     config.lanIp = options.lanIp;
     config.lanIpExplicit = true;
@@ -177,38 +186,26 @@ function resolveSavedProxyConfig(options: {
   return config;
 }
 
-function readCurrentProxyConfig(dir: string): {
-  config: SavedProxyConfig | null;
-  hasSavedConfig: boolean;
-} {
-  const savedConfig = readSavedProxyConfig(dir);
-  if (savedConfig) {
-    return { config: savedConfig, hasSavedConfig: true };
-  }
-
+function readCurrentProxyConfig(dir: string): ProxyConfig {
   const lanIp = readLanMarker(dir);
   const tld = readTldFromDir(dir);
 
   return {
-    config: {
-      useHttps: readTlsMarker(dir),
-      customCertPath: null,
-      customKeyPath: null,
-      lanMode: lanIp !== null || tld === "local",
-      lanIp,
-      lanIpExplicit: lanIp !== null,
-      tld,
-      useWildcard: false,
-    },
-    hasSavedConfig: false,
+    useHttps: readTlsMarker(dir),
+    customCertPath: null,
+    customKeyPath: null,
+    lanMode: lanIp !== null || tld === "local",
+    lanIp,
+    lanIpExplicit: false,
+    tld,
+    useWildcard: false,
   };
 }
 
 function getProxyConfigMismatchMessages(
-  desiredConfig: SavedProxyConfig,
-  actualConfig: SavedProxyConfig,
-  explicit: ProxyConfigExplicitness,
-  hasSavedConfig: boolean
+  desiredConfig: ProxyConfig,
+  actualConfig: ProxyConfig,
+  explicit: ProxyConfigExplicitness
 ): string[] {
   const messages: string[] = [];
 
@@ -240,22 +237,10 @@ function getProxyConfigMismatchMessages(
     );
   }
 
-  if (
-    explicit.useWildcard &&
-    hasSavedConfig &&
-    desiredConfig.useWildcard !== actualConfig.useWildcard
-  ) {
-    messages.push(
-      desiredConfig.useWildcard
-        ? "requested wildcard subdomain fallback, but the running proxy is using strict host matching"
-        : "requested strict host matching, but the running proxy is using wildcard subdomain fallback"
-    );
-  }
-
   return messages;
 }
 
-function formatProxyStartCommand(proxyPort: number, config: SavedProxyConfig): string {
+function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string {
   const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
   const { args } = buildProxyStartConfig({
     useHttps: config.useHttps,
@@ -274,7 +259,7 @@ function formatProxyStartCommand(proxyPort: number, config: SavedProxyConfig): s
 
 function printProxyConfigMismatch(
   proxyPort: number,
-  desiredConfig: SavedProxyConfig,
+  desiredConfig: ProxyConfig,
   messages: string[]
 ): never {
   const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
@@ -338,7 +323,6 @@ function startProxyServer(
   store: RouteStore,
   proxyPort: number,
   tld: string,
-  savedConfig: SavedProxyConfig,
   tlsOptions?: { cert: Buffer; key: Buffer },
   lanIp?: string | null,
   strict?: boolean
@@ -507,8 +491,7 @@ function startProxyServer(
     writeTlsMarker(store.dir, isTls);
     writeTldFile(store.dir, tld);
     writeLanMarker(store.dir, activeLanIp);
-    writeSavedProxyConfig(store.dir, savedConfig);
-    fixOwnership(store.dir, store.pidPath, store.portFilePath, savedProxyConfigPath(store.dir));
+    fixOwnership(store.dir, store.pidPath, store.portFilePath);
     const proto = isTls ? "HTTPS/2" : "HTTP";
     const tldLabel = tld !== DEFAULT_TLD ? ` (TLD: .${tld})` : "";
     const modeLabel = strict === false ? " (wildcard)" : "";
@@ -566,7 +549,6 @@ function startProxyServer(
     }
     writeTlsMarker(store.dir, false);
     writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
@@ -743,6 +725,7 @@ async function runApp(
   force: boolean,
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
+  lanMode = false,
   lanIp?: string | null
 ) {
   let store = initialStore;
@@ -764,8 +747,8 @@ async function runApp(
     tld: process.env.PORTLESS_TLD !== undefined,
     useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
   };
-  const desiredConfig = resolveSavedProxyConfig({
-    savedConfig: readSavedProxyConfig(stateDir),
+  const desiredConfig = resolveProxyConfig({
+    persistedLanMode: lanMode,
     explicit,
     defaultTld: envTld,
     useHttps: !isHttpsEnvDisabled(),
@@ -870,24 +853,20 @@ async function runApp(
     stateDir = discovered.dir;
     tld = discovered.tld;
     tls = discovered.tls;
+    lanMode = discovered.lanMode;
     lanIp = discovered.lanIp;
     store = new RouteStore(stateDir, {
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
     console.log(colors.green("Proxy started in background"));
   } else {
-    const { config: runningConfig, hasSavedConfig } = readCurrentProxyConfig(stateDir);
-    if (runningConfig) {
-      const mismatchMessages = getProxyConfigMismatchMessages(
-        desiredConfig,
-        runningConfig,
-        explicit,
-        hasSavedConfig
-      );
-      if (mismatchMessages.length > 0) {
-        printProxyConfigMismatch(proxyPort, desiredConfig, mismatchMessages);
-      }
+    const runningConfig = readCurrentProxyConfig(stateDir);
+    const mismatchMessages = getProxyConfigMismatchMessages(desiredConfig, runningConfig, explicit);
+    if (mismatchMessages.length > 0) {
+      printProxyConfigMismatch(proxyPort, desiredConfig, mismatchMessages);
     }
+    lanMode = runningConfig.lanMode;
+    lanIp = runningConfig.lanIp;
     console.log(chalk.gray("-- Proxy is running"));
   }
 
@@ -946,13 +925,13 @@ async function runApp(
   // conflicts with its internal networking, causing HMR WebSocket degradation.
   const basename = path.basename(commandArgs[0]);
   const isExpo = basename === "expo";
-  const isExpoLan = isExpo && !!(lanIp || isLanEnvEnabled());
+  const isExpoLan = isExpo && (lanMode || isLanEnvEnabled());
   const hostBind = isExpoLan ? undefined : "127.0.0.1";
 
   // Ensure PORTLESS_LAN is propagated to child processes when the proxy
-  // was started with --lan separately and lanIp was discovered from the
-  // state marker, not from the env var.
-  if (lanIp && !process.env.PORTLESS_LAN) {
+  // was started with --lan separately and discovered from the state marker,
+  // not from the env var.
+  if (lanMode && !process.env.PORTLESS_LAN) {
     process.env.PORTLESS_LAN = "1";
   }
 
@@ -976,7 +955,7 @@ async function runApp(
       // Note: EXPO_PACKAGER_PROXY_URL is not used — expo-dev-client removed
       // baked-in pinging, making this env var ineffective. Expo handles its
       // own LAN discovery natively.
-      ...(lanIp ? { PORTLESS_LAN: "1" } : {}),
+      ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
     },
     onCleanup: () => {
       try {
@@ -1230,8 +1209,11 @@ ${colors.bold("LAN mode:")}
   Useful for testing React Native / Expo apps on real devices.
   Expo keeps Metro's default LAN host behavior in this mode.
   Auto-detected LAN IPs follow network changes automatically.
-  Stopped proxies reuse their last successful config on the next start.
-  If a proxy is already running with different explicit settings, stop it first.
+  Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
+  Other proxy settings still follow the current flags and env vars.
+  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+  If a proxy is already running with different explicit LAN/TLS/TLD settings,
+  stop it first.
   ${colors.cyan("portless proxy start --lan")}
   ${colors.cyan("portless proxy start --lan --https")}
   ${colors.cyan("portless proxy start --lan --ip 192.168.1.42")}
@@ -1259,7 +1241,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
   PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
-  PORTLESS_LAN=1                Always enable LAN mode (set in .bashrc / .zshrc)
+  PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=1         Auto-sync ${HOSTS_DISPLAY} (auto-enabled for custom TLDs)
@@ -1616,7 +1598,8 @@ ${colors.bold("LAN mode (--lan):")}
   via mDNS (.local domains). Useful for testing on real mobile devices.
   Auto-detects your LAN IP and follows changes automatically, or use
   --ip to pin one.
-  Stopped proxies reuse their last successful config on the next start.
+  Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
+  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
 `);
     process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
@@ -1719,9 +1702,11 @@ ${colors.bold("LAN mode (--lan):")}
 
   // Resolve state directory based on the port
   let stateDir = resolveStateDir(proxyPort);
+  let persistedLanMode = readLanMarker(stateDir) !== null;
   let runningPort: number | null = null;
   if (!hasExplicitPort) {
     const currentState = await discoverState();
+    persistedLanMode = currentState.lanMode;
     if (
       (await isProxyRunning(currentState.port)) ||
       (!!process.env.PORTLESS_STATE_DIR && (await isPortListening(currentState.port)))
@@ -1731,8 +1716,8 @@ ${colors.bold("LAN mode (--lan):")}
       stateDir = currentState.dir;
     }
   }
-  const desiredConfig = resolveSavedProxyConfig({
-    savedConfig: readSavedProxyConfig(stateDir),
+  const desiredConfig = resolveProxyConfig({
+    persistedLanMode,
     explicit,
     defaultTld: getDefaultTld(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
@@ -1792,17 +1777,10 @@ ${colors.bold("LAN mode (--lan):")}
   // proxies because the TLS-enabled proxy accepts plain HTTP via byte-peeking.
   const proxyRunning = runningPort !== null || (await isProxyRunning(proxyPort));
   if (proxyRunning) {
-    const { config: runningConfig, hasSavedConfig } = readCurrentProxyConfig(stateDir);
-    if (runningConfig) {
-      const mismatchMessages = getProxyConfigMismatchMessages(
-        desiredConfig,
-        runningConfig,
-        explicit,
-        hasSavedConfig
-      );
-      if (mismatchMessages.length > 0) {
-        printProxyConfigMismatch(proxyPort, desiredConfig, mismatchMessages);
-      }
+    const runningConfig = readCurrentProxyConfig(stateDir);
+    const mismatchMessages = getProxyConfigMismatchMessages(desiredConfig, runningConfig, explicit);
+    if (mismatchMessages.length > 0) {
+      printProxyConfigMismatch(proxyPort, desiredConfig, mismatchMessages);
     }
     if (isForeground) {
       return;
@@ -1849,7 +1827,7 @@ ${colors.bold("LAN mode (--lan):")}
     delete process.env[INTERNAL_LAN_IP_ENV];
   }
 
-  const resolvedConfig: SavedProxyConfig = {
+  const resolvedConfig: ProxyConfig = {
     ...desiredConfig,
     useHttps,
     customCertPath,
@@ -2017,15 +1995,7 @@ ${colors.bold("LAN mode (--lan):")}
   // Foreground mode: run the proxy directly in this process
   if (isForeground) {
     console.log(chalk.blue.bold("\nportless proxy\n"));
-    startProxyServer(
-      store,
-      proxyPort,
-      tld,
-      resolvedConfig,
-      tlsOptions,
-      lanIp,
-      desiredWildcard ? false : undefined
-    );
+    startProxyServer(store, proxyPort, tld, tlsOptions, lanIp, desiredWildcard ? false : undefined);
     return;
   }
 
@@ -2122,7 +2092,7 @@ async function handleRunMode(args: string[]): Promise<void> {
   const worktree = detectWorktreePrefix();
   const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
 
-  const { dir, port, tls, tld, lanIp } = await discoverState();
+  const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
@@ -2137,6 +2107,7 @@ async function handleRunMode(args: string[]): Promise<void> {
     parsed.force,
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
+    lanMode,
     lanIp
   );
 }
@@ -2159,7 +2130,7 @@ async function handleNamedMode(args: string[]): Promise<void> {
     .map((label) => truncateLabel(label))
     .join(".");
 
-  const { dir, port, tls, tld, lanIp } = await discoverState();
+  const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
@@ -2174,6 +2145,7 @@ async function handleNamedMode(args: string[]): Promise<void> {
     parsed.force,
     undefined,
     parsed.appPort,
+    lanMode,
     lanIp
   );
 }

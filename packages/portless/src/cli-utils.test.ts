@@ -11,7 +11,6 @@ import {
   INTERNAL_LAN_IP_FLAG,
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
-  type SavedProxyConfig,
   SYSTEM_STATE_DIR,
   USER_STATE_DIR,
   discoverState,
@@ -24,10 +23,8 @@ import {
   isProxyRunning,
   parsePidFromNetstat,
   readLanMarker,
-  readSavedProxyConfig,
   readTldFromDir,
   resolveStateDir,
-  writeSavedProxyConfig,
   validateTld,
   writeLanMarker,
   writeTldFile,
@@ -820,7 +817,7 @@ describe("readLanMarker / writeLanMarker", () => {
     expect(readLanMarker(tmpDir)).toBeNull();
   });
 
-  it("propagates the LAN marker through discoverState", async () => {
+  it("uses the LAN marker to remember LAN mode when the proxy is stopped", async () => {
     const prevStateDir = process.env.PORTLESS_STATE_DIR;
     try {
       fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
@@ -832,57 +829,7 @@ describe("readLanMarker / writeLanMarker", () => {
         dir: tmpDir,
         port: 1355,
         tld: "local",
-        lanIp: "192.168.1.42",
-      });
-    } finally {
-      if (prevStateDir === undefined) {
-        delete process.env.PORTLESS_STATE_DIR;
-      } else {
-        process.env.PORTLESS_STATE_DIR = prevStateDir;
-      }
-    }
-  });
-});
-
-describe("readSavedProxyConfig / writeSavedProxyConfig", () => {
-  let tmpDir: string;
-
-  const savedConfig: SavedProxyConfig = {
-    useHttps: true,
-    customCertPath: null,
-    customKeyPath: null,
-    lanMode: true,
-    lanIp: null,
-    lanIpExplicit: false,
-    tld: "local",
-    useWildcard: true,
-  };
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-saved-config-test-"));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("writes and reads the saved proxy config", () => {
-    writeSavedProxyConfig(tmpDir, savedConfig);
-    expect(readSavedProxyConfig(tmpDir)).toEqual(savedConfig);
-  });
-
-  it("uses the saved config in discoverState when the proxy is stopped", async () => {
-    const prevStateDir = process.env.PORTLESS_STATE_DIR;
-    try {
-      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "19876");
-      writeSavedProxyConfig(tmpDir, savedConfig);
-      process.env.PORTLESS_STATE_DIR = tmpDir;
-
-      await expect(discoverState()).resolves.toMatchObject({
-        dir: tmpDir,
-        port: 19876,
-        tls: true,
-        tld: "local",
+        lanMode: true,
         lanIp: null,
       });
     } finally {

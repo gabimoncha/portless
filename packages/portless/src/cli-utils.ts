@@ -33,17 +33,6 @@ export const INTERNAL_LAN_IP_ENV = "PORTLESS_INTERNAL_LAN_IP";
 /** Internal-only flag used to pass an auto-detected LAN IP through re-exec. */
 export const INTERNAL_LAN_IP_FLAG = "--lan-ip-auto";
 
-export interface SavedProxyConfig {
-  useHttps: boolean;
-  customCertPath: string | null;
-  customKeyPath: string | null;
-  lanMode: boolean;
-  lanIp: string | null;
-  lanIpExplicit: boolean;
-  tld: string;
-  useWildcard: boolean;
-}
-
 /**
  * System-wide state directory (used when proxy needs sudo on Unix).
  * Hardcoded to /tmp/portless rather than os.tmpdir() because macOS returns
@@ -167,10 +156,13 @@ export function writeTlsMarker(dir: string, enabled: boolean): void {
   }
 }
 
-/** Name of the marker file that stores the LAN IP when --lan is active. */
+/**
+ * Name of the marker file that remembers LAN mode across proxy restarts.
+ * While the proxy is running, the file stores the last known LAN IP.
+ */
 const LAN_MARKER_FILE = "proxy.lan";
 
-/** Read the LAN marker from a state directory. Returns the IP or null. */
+/** Read the LAN marker from a state directory. Returns the last known IP or null. */
 export function readLanMarker(dir: string): string | null {
   try {
     const raw = fs.readFileSync(path.join(dir, LAN_MARKER_FILE), "utf-8").trim();
@@ -227,9 +219,6 @@ export function validateTld(tld: string): string | null {
 /** Name of the file that stores the proxy's active TLD. */
 const TLD_FILE = "proxy.tld";
 
-/** Name of the file that stores the last successful proxy config. */
-const SAVED_PROXY_CONFIG_FILE = "proxy.config.json";
-
 /** Read the TLD from a state directory. Returns DEFAULT_TLD if absent. */
 export function readTldFromDir(dir: string): string {
   try {
@@ -252,52 +241,6 @@ export function writeTldFile(dir: string, tld: string): void {
   } else {
     fs.writeFileSync(filePath, tld, { mode: 0o644 });
   }
-}
-
-/** Return the path to the persisted proxy config file. */
-export function savedProxyConfigPath(dir: string): string {
-  return path.join(dir, SAVED_PROXY_CONFIG_FILE);
-}
-
-function isSavedProxyConfig(value: unknown): value is SavedProxyConfig {
-  if (!value || typeof value !== "object") return false;
-  const config = value as Record<string, unknown>;
-  return (
-    typeof config.useHttps === "boolean" &&
-    (typeof config.customCertPath === "string" || config.customCertPath === null) &&
-    (typeof config.customKeyPath === "string" || config.customKeyPath === null) &&
-    typeof config.lanMode === "boolean" &&
-    (typeof config.lanIp === "string" || config.lanIp === null) &&
-    typeof config.lanIpExplicit === "boolean" &&
-    typeof config.tld === "string" &&
-    typeof config.useWildcard === "boolean"
-  );
-}
-
-/** Read the last successful proxy config from a state directory. */
-export function readSavedProxyConfig(dir: string): SavedProxyConfig | null {
-  try {
-    const raw = fs.readFileSync(savedProxyConfigPath(dir), "utf-8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (!isSavedProxyConfig(parsed)) return null;
-    const tldErr = validateTld(parsed.tld);
-    if (tldErr) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-/** Persist the last successful proxy config for future starts. */
-export function writeSavedProxyConfig(dir: string, config: SavedProxyConfig): void {
-  const normalized: SavedProxyConfig = {
-    ...config,
-    customCertPath: config.customCertPath ? path.resolve(config.customCertPath) : null,
-    customKeyPath: config.customKeyPath ? path.resolve(config.customKeyPath) : null,
-  };
-  fs.writeFileSync(savedProxyConfigPath(dir), JSON.stringify(normalized, null, 2) + "\n", {
-    mode: 0o644,
-  });
 }
 
 /**
@@ -402,7 +345,8 @@ export function buildProxyStartConfig(options: {
 }
 
 /**
- * Discover the active proxy's state directory, port, TLS mode, TLD, and LAN IP.
+ * Discover the active proxy's state directory, port, TLS mode, TLD, LAN mode,
+ * and current LAN IP when available.
  * Checks the user-level dir first, then the system-level dir.
  * Falls back to the system dir with the default port if nothing is running.
  */
@@ -411,24 +355,28 @@ export async function discoverState(): Promise<{
   port: number;
   tls: boolean;
   tld: string;
+  lanMode: boolean;
   lanIp: string | null;
 }> {
   // Env var override
   if (process.env.PORTLESS_STATE_DIR) {
     const dir = process.env.PORTLESS_STATE_DIR;
     const port = readPortFromDir(dir) ?? getDefaultPort();
+    const lanIp = readLanMarker(dir);
     if ((await isProxyRunning(port)) || (await isPortListening(port))) {
       const tls = readTlsMarker(dir);
       const tld = readTldFromDir(dir);
-      const lanIp = readLanMarker(dir);
-      return { dir, port, tls, tld, lanIp };
+      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
     }
 
-    const savedConfig = readSavedProxyConfig(dir);
-    const tls = savedConfig?.useHttps ?? readTlsMarker(dir);
-    const tld = savedConfig?.tld ?? readTldFromDir(dir) ?? getDefaultTld();
-    const lanIp = savedConfig?.lanIpExplicit ? savedConfig.lanIp : readLanMarker(dir);
-    return { dir, port, tls, tld, lanIp };
+    return {
+      dir,
+      port,
+      tls: readTlsMarker(dir),
+      tld: readTldFromDir(dir),
+      lanMode: lanIp !== null,
+      lanIp: null,
+    };
   }
 
   // Check user-level state first (~/.portless)
@@ -441,7 +389,14 @@ export async function discoverState(): Promise<{
       const tls = readTlsMarker(USER_STATE_DIR);
       const tld = readTldFromDir(USER_STATE_DIR);
       const lanIp = readLanMarker(USER_STATE_DIR);
-      return { dir: USER_STATE_DIR, port: userPort, tls, tld, lanIp };
+      return {
+        dir: USER_STATE_DIR,
+        port: userPort,
+        tls,
+        tld,
+        lanMode: lanIp !== null || tld === "local",
+        lanIp,
+      };
     }
   }
 
@@ -452,7 +407,14 @@ export async function discoverState(): Promise<{
       const tls = readTlsMarker(SYSTEM_STATE_DIR);
       const tld = readTldFromDir(SYSTEM_STATE_DIR);
       const lanIp = readLanMarker(SYSTEM_STATE_DIR);
-      return { dir: SYSTEM_STATE_DIR, port: systemPort, tls, tld, lanIp };
+      return {
+        dir: SYSTEM_STATE_DIR,
+        port: systemPort,
+        tls,
+        tld,
+        lanMode: lanIp !== null || tld === "local",
+        lanIp,
+      };
     }
   }
 
@@ -469,18 +431,18 @@ export async function discoverState(): Promise<{
       const tls = readTlsMarker(dir);
       const tld = readTldFromDir(dir);
       const lanIp = readLanMarker(dir);
-      return { dir, port, tls, tld, lanIp };
+      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
     }
   }
 
   const dir = resolveStateDir(configuredPort);
-  const savedConfig = readSavedProxyConfig(dir);
   return {
     dir,
     port: configuredPort,
-    tls: savedConfig?.useHttps ?? false,
-    tld: savedConfig?.tld ?? getDefaultTld(),
-    lanIp: savedConfig?.lanIpExplicit ? savedConfig.lanIp : null,
+    tls: false,
+    tld: getDefaultTld(),
+    lanMode: readLanMarker(dir) !== null,
+    lanIp: null,
   };
 }
 

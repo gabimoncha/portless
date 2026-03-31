@@ -176,11 +176,18 @@ describe("CLI", () => {
       expect(stdout.trim()).toBe("bypassed");
     });
 
-    it("does not bypass proxy commands when PORTLESS=0 is set", () => {
+    it("does not bypass proxy commands when PORTLESS=0 is set", async () => {
       // 'proxy stop' should still be handled as a proxy command, not bypassed
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bypass-proxy-"));
+      const proxyPort = await getFreePort();
       const { stderr } = run(["proxy", "stop"], {
-        env: { PORTLESS: "0" },
+        env: {
+          PORTLESS: "0",
+          PORTLESS_PORT: proxyPort.toString(),
+          PORTLESS_STATE_DIR: tmpDir,
+        },
       });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
       // Should not try to run "stop" as a shell command
       expect(stderr).not.toContain("ENOENT");
     });
@@ -452,19 +459,6 @@ describe("CLI", () => {
         });
 
         fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
-        fs.writeFileSync(
-          path.join(tmpDir, "proxy.config.json"),
-          JSON.stringify({
-            useHttps: false,
-            customCertPath: null,
-            customKeyPath: null,
-            lanMode: false,
-            lanIp: null,
-            lanIpExplicit: false,
-            tld: "localhost",
-            useWildcard: false,
-          }) + "\n"
-        );
 
         const { status, stderr } = run(["proxy", "start", "--lan"], {
           env: { PORTLESS_STATE_DIR: tmpDir },
@@ -481,106 +475,58 @@ describe("CLI", () => {
     });
   });
 
-  describe("sticky proxy config", () => {
+  describe("persisted LAN marker", () => {
     let tmpDir: string;
 
     beforeEach(() => {
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-sticky-config-"));
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-lan-marker-"));
     });
 
     afterEach(() => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it("reuses the saved proxy config when auto-starting from run", async () => {
+    it.skipIf(process.platform === "win32")(
+      "reuses persisted LAN mode when starting the proxy again",
+      async () => {
+        const proxyPort = await getFreePort();
+        const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "portless-empty-path-"));
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
+
+        try {
+          const { status, stderr } = run(["proxy", "start"], {
+            env: {
+              PATH: emptyPath,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_PORT: proxyPort.toString(),
+            },
+          });
+
+          expect(status).toBe(1);
+          expect(stderr).toContain("LAN mode requires mDNS publishing");
+        } finally {
+          fs.rmSync(emptyPath, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it("PORTLESS_LAN=0 overrides the LAN marker on a fresh start", async () => {
       const proxyPort = await getFreePort();
       const env = {
         PORTLESS_STATE_DIR: tmpDir,
         PORTLESS_PORT: proxyPort.toString(),
+        PORTLESS_LAN: "0",
+        PORTLESS_HTTPS: "0",
       };
 
-      fs.writeFileSync(
-        path.join(tmpDir, "proxy.config.json"),
-        JSON.stringify({
-          useHttps: false,
-          customCertPath: null,
-          customKeyPath: null,
-          lanMode: false,
-          lanIp: null,
-          lanIpExplicit: false,
-          tld: "test",
-          useWildcard: false,
-        }) + "\n"
-      );
+      fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
 
       try {
         const { status, stdout } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
         expect(status).toBe(0);
-        expect(stdout).toContain(`http://myapp.test:${proxyPort}`);
-      } finally {
-        run(["proxy", "stop"], { env });
-      }
-    });
-
-    it("explicit --lan overrides a saved non-LAN config", async () => {
-      const proxyPort = await getFreePort();
-      const env = {
-        PORTLESS_STATE_DIR: tmpDir,
-        PORTLESS_PORT: proxyPort.toString(),
-      };
-
-      fs.writeFileSync(
-        path.join(tmpDir, "proxy.config.json"),
-        JSON.stringify({
-          useHttps: false,
-          customCertPath: null,
-          customKeyPath: null,
-          lanMode: false,
-          lanIp: null,
-          lanIpExplicit: false,
-          tld: "test",
-          useWildcard: false,
-        }) + "\n"
-      );
-
-      try {
-        const { status, stdout } = run(
-          ["--lan", "--ip", "192.168.1.42", "myapp", "node", "-e", "process.exit(0)"],
-          { env }
-        );
-        expect(status).toBe(0);
-        // LAN mode forces .local TLD
-        expect(stdout).toContain(`http://myapp.local:${proxyPort}`);
-      } finally {
-        run(["proxy", "stop"], { env });
-      }
-    });
-
-    it("no explicit overrides reuses saved config unchanged", async () => {
-      const proxyPort = await getFreePort();
-      const env = {
-        PORTLESS_STATE_DIR: tmpDir,
-        PORTLESS_PORT: proxyPort.toString(),
-      };
-
-      fs.writeFileSync(
-        path.join(tmpDir, "proxy.config.json"),
-        JSON.stringify({
-          useHttps: false,
-          customCertPath: null,
-          customKeyPath: null,
-          lanMode: false,
-          lanIp: null,
-          lanIpExplicit: false,
-          tld: "test",
-          useWildcard: true,
-        }) + "\n"
-      );
-
-      try {
-        const { status, stdout } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
-        expect(status).toBe(0);
-        expect(stdout).toContain(`http://myapp.test:${proxyPort}`);
+        expect(stdout).toContain(`http://myapp.localhost:${proxyPort}`);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
       } finally {
         run(["proxy", "stop"], { env });
       }
@@ -842,17 +788,18 @@ describe("CLI", () => {
   });
 
   describe("proxy start/stop lifecycle", () => {
-    const TEST_PORT = 18355;
     let tmpDir: string;
+    let testPort: number;
 
     const proxyEnv = () => ({
-      PORTLESS_PORT: String(TEST_PORT),
+      PORTLESS_PORT: String(testPort),
       PORTLESS_HTTPS: "0",
       PORTLESS_STATE_DIR: tmpDir,
     });
 
-    beforeEach(() => {
+    beforeEach(async () => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-lifecycle-"));
+      testPort = await getFreePort();
     });
 
     afterEach(() => {
@@ -864,7 +811,7 @@ describe("CLI", () => {
     it("starts the proxy and stops it cleanly", () => {
       const start = run(["proxy", "start"], { env: proxyEnv() });
       expect(start.status).toBe(0);
-      expect(start.stdout).toContain(`proxy started on port ${TEST_PORT}`);
+      expect(start.stdout).toContain(`proxy started on port ${testPort}`);
 
       const stop = run(["proxy", "stop"], { env: proxyEnv() });
       expect(stop.status).toBe(0);
@@ -895,7 +842,7 @@ describe("CLI", () => {
       expect(start.status).toBe(0);
 
       // Stop without PORTLESS_PORT, using -p instead
-      const stop = run(["proxy", "stop", "-p", String(TEST_PORT)], {
+      const stop = run(["proxy", "stop", "-p", String(testPort)], {
         env: { PORTLESS_HTTPS: "0", PORTLESS_STATE_DIR: tmpDir },
       });
       expect(stop.status).toBe(0);
