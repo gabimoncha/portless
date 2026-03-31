@@ -24,6 +24,11 @@ Portless is configured through environment variables. No config files needed.
       <td>off</td>
     </tr>
     <tr>
+      <td>`PORTLESS_LAN`</td>
+      <td>Set to `1` to always enable LAN mode (mDNS `.local` domains)</td>
+      <td>off</td>
+    </tr>
+    <tr>
       <td>`PORTLESS_TLD`</td>
       <td>Use a custom TLD instead of `.localhost` (e.g. `test`)</td>
       <td>`localhost`</td>
@@ -109,6 +114,10 @@ Override with `PORTLESS_STATE_DIR`.
     <tr>
       <td>`proxy.log`</td>
       <td>Proxy daemon log output</td>
+    </tr>
+    <tr>
+      <td>`proxy.lan`</td>
+      <td>LAN IP when proxy is in LAN mode</td>
     </tr>
   </tbody>
 </table>

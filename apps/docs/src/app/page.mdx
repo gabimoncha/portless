@@ -31,6 +31,29 @@ portless myapp next dev
 
 The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
 
+> **Expo / React Native on iOS:** iOS App Transport Security (ATS) blocks cleartext HTTP to `.localhost` subdomains by default. Add an exception domain to your `app.json`:
+>
+> ```json
+> {
+>   "expo": {
+>     "ios": {
+>       "infoPlist": {
+>         "NSAppTransportSecurity": {
+>           "NSExceptionDomains": {
+>             "myapp.localhost": {
+>               "NSExceptionAllowsInsecureHTTPLoads": true,
+>               "NSIncludesSubdomains": true
+>             }
+>           }
+>         }
+>       }
+>     }
+>   }
+> }
+> ```
+>
+> For [LAN mode](/commands#lan-mode) (`.local` domains), use `NSAllowsLocalNetworking` instead.
+
 ## Use in package.json
 
 ```json
