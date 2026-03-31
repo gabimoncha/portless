@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.0
+
+### Breaking Changes
+
+- **HTTPS on port 443 is now the default**: The proxy defaults to HTTPS on port 443 instead of HTTP on port 1355. Auto-elevates with sudo on macOS/Linux to bind privileged ports. Use `--no-tls` for plain HTTP on port 80, or `-p 1355` for the previous unprivileged port
+- **`PORTLESS_HTTPS` env var inverted**: HTTPS is on by default; set `PORTLESS_HTTPS=0` to disable (replaces the old `PORTLESS_HTTPS=1` opt-in)
+
+### New Features
+
+- **HTTP-to-HTTPS redirect**: When the HTTPS proxy runs on port 443, a companion HTTP server on port 80 automatically redirects all requests to HTTPS
+- **Auto-sudo for proxy lifecycle**: `portless proxy start` auto-elevates with sudo when binding privileged ports. `portless proxy stop` does the same when the running proxy is owned by root
+- **Clean URLs**: URLs are now `https://myapp.localhost` instead of `http://myapp.localhost:1355`. No port numbers to remember
+
 ## 0.8.0
 
 ### Breaking Changes
