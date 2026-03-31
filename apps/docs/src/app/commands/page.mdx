@@ -165,7 +165,7 @@ Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-u
 
 **Framework notes:**
 
-- **Next.js**: Add `allowedDevOrigins: ['*.local']` to `next.config.js` to allow HMR from `.local` origins.
+- **Next.js**: Add `allowedDevOrigins: ['myapp.local', '*.myapp.local']` to `next.config.js` so LAN mode requests still work when portless adds a git worktree prefix.
 - **Vite / React Router / SvelteKit / Astro**: Handled automatically via `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`.
 - **Expo / React Native**: Add `NSAllowsLocalNetworking` to your `app.json` for iOS ATS (see [Getting Started](/) for the `.localhost` equivalent using `NSExceptionDomains`):
 

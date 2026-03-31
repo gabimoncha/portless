@@ -145,12 +145,12 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
 
 ### Framework notes
 
-- **Next.js** restricts development-mode origins to the hostname you started the server with (usually `localhost`). Add the `.local` URLs you need to `allowedDevOrigins` in `next.config.js` so LAN mode requests succeed:
+- **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
 
   ```js
   // next.config.js
   module.exports = {
-    allowedDevOrigins: ["https://myapp.localhost:1355", "https://api.myapp.localhost:1355"],
+    allowedDevOrigins: ["myapp.local", "*.myapp.local"],
   };
   ```
 

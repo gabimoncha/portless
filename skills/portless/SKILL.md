@@ -155,12 +155,12 @@ portless proxy start --lan --ip 192.168.1.42
 
 LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling).
 
-- **Next.js** blocks development origins that don’t match the hostname you started the server with (usually `localhost`). Add the `.local` URLs you want to `allowedDevOrigins` so LAN mode requests are accepted:
+- **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
 
   ```js
   // next.config.js
   module.exports = {
-    allowedDevOrigins: ["https://myapp.localhost:1355", "https://api.myapp.localhost:1355"],
+    allowedDevOrigins: ["myapp.local", "*.myapp.local"],
   };
   ```
 
