@@ -67,8 +67,8 @@ portless alias --remove <name>
 Register a route for a service not managed by portless (e.g. a Docker container). Aliases persist across stale-route cleanup.
 
 ```bash
-portless alias my-postgres 5432     # -> http://my-postgres.localhost:1355
-portless alias redis 6379           # -> http://redis.localhost:1355
+portless alias my-postgres 5432     # -> https://my-postgres.localhost
+portless alias redis 6379           # -> https://redis.localhost
 portless alias --remove my-postgres # remove the alias
 ```
 
@@ -83,7 +83,7 @@ Shows active routes and their assigned ports.
 ## Trust the CA
 
 ```bash
-sudo portless trust
+portless trust
 ```
 
 Adds the portless certificate authority to your system trust store. Required once for HTTPS with auto-generated certs.
@@ -106,11 +106,15 @@ portless proxy start
   <tbody>
     <tr>
       <td>`-p, --port <number>`</td>
-      <td>Proxy port (default: 1355). Below 1024 requires sudo.</td>
+      <td>Proxy port (default: 443, or 80 with `--no-tls`). Auto-elevates with sudo.</td>
+    </tr>
+    <tr>
+      <td>`--no-tls`</td>
+      <td>Disable HTTPS (use plain HTTP on port 80)</td>
     </tr>
     <tr>
       <td>`--https`</td>
-      <td>Enable HTTP/2 + TLS with auto-generated certs</td>
+      <td>Enable HTTPS (default, accepted for compatibility)</td>
     </tr>
     <tr>
       <td>`--lan`</td>
@@ -126,15 +130,11 @@ portless proxy start
     </tr>
     <tr>
       <td>`--cert <path>`</td>
-      <td>Custom TLS certificate (implies `--https`)</td>
+      <td>Custom TLS certificate</td>
     </tr>
     <tr>
       <td>`--key <path>`</td>
-      <td>Custom TLS private key (implies `--https`)</td>
-    </tr>
-    <tr>
-      <td>`--no-tls`</td>
-      <td>Disable HTTPS (overrides `PORTLESS_HTTPS`)</td>
+      <td>Custom TLS private key</td>
     </tr>
     <tr>
       <td>`--foreground`</td>
@@ -186,8 +186,8 @@ Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-u
 ## Hosts
 
 ```bash
-sudo portless hosts sync     # add current routes to /etc/hosts
-sudo portless hosts clean    # remove portless entries from /etc/hosts
+portless hosts sync     # add current routes to /etc/hosts
+portless hosts clean    # remove portless entries from /etc/hosts
 ```
 
 Auto-enabled for custom TLDs. For `.localhost`, set `PORTLESS_SYNC_HOSTS=1` to enable.

@@ -6,8 +6,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   buildProxyStartConfig,
-  DEFAULT_PROXY_PORT,
   DEFAULT_TLD,
+  FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
@@ -18,6 +18,8 @@ import {
   findFreePort,
   getDefaultPort,
   getDefaultTld,
+  getProtocolPort,
+  isHttpsEnvDisabled,
   injectFrameworkFlags,
   isProxyRunning,
   parsePidFromNetstat,
@@ -140,8 +142,8 @@ describe("resolveStateDir", () => {
 });
 
 describe("constants", () => {
-  it("DEFAULT_PROXY_PORT is 1355", () => {
-    expect(DEFAULT_PROXY_PORT).toBe(1355);
+  it("FALLBACK_PROXY_PORT is 1355", () => {
+    expect(FALLBACK_PROXY_PORT).toBe(1355);
   });
 
   it("PRIVILEGED_PORT_THRESHOLD is 1024", () => {
@@ -218,6 +220,16 @@ describe("parsePidFromNetstat", () => {
   });
 });
 
+describe("getProtocolPort", () => {
+  it("returns 443 for TLS", () => {
+    expect(getProtocolPort(true)).toBe(443);
+  });
+
+  it("returns 80 for plain HTTP", () => {
+    expect(getProtocolPort(false)).toBe(80);
+  });
+});
+
 describe("getDefaultPort", () => {
   let originalEnv: string | undefined;
 
@@ -233,32 +245,82 @@ describe("getDefaultPort", () => {
     }
   });
 
-  it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is not set", () => {
+  it("returns FALLBACK_PROXY_PORT when called without tls argument", () => {
     delete process.env.PORTLESS_PORT;
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort()).toBe(FALLBACK_PROXY_PORT);
   });
 
-  it("returns PORTLESS_PORT when set to a valid port", () => {
+  it("returns 443 when tls is true", () => {
+    delete process.env.PORTLESS_PORT;
+    expect(getDefaultPort(true)).toBe(443);
+  });
+
+  it("returns 80 when tls is false", () => {
+    delete process.env.PORTLESS_PORT;
+    expect(getDefaultPort(false)).toBe(80);
+  });
+
+  it("returns PORTLESS_PORT when set, regardless of tls argument", () => {
     process.env.PORTLESS_PORT = "8080";
     expect(getDefaultPort()).toBe(8080);
+    expect(getDefaultPort(true)).toBe(8080);
+    expect(getDefaultPort(false)).toBe(8080);
   });
 
-  it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is invalid", () => {
+  it("returns protocol default when PORTLESS_PORT is invalid", () => {
     process.env.PORTLESS_PORT = "not-a-number";
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort()).toBe(FALLBACK_PROXY_PORT);
+    expect(getDefaultPort(true)).toBe(443);
+    expect(getDefaultPort(false)).toBe(80);
   });
 
-  it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is out of range", () => {
+  it("returns protocol default when PORTLESS_PORT is out of range", () => {
     process.env.PORTLESS_PORT = "0";
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort(true)).toBe(443);
 
     process.env.PORTLESS_PORT = "70000";
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort(false)).toBe(80);
   });
 
-  it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is empty", () => {
+  it("returns FALLBACK_PROXY_PORT when PORTLESS_PORT is empty and tls is undefined", () => {
     process.env.PORTLESS_PORT = "";
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort()).toBe(FALLBACK_PROXY_PORT);
+  });
+});
+
+describe("isHttpsEnvDisabled", () => {
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    originalEnv = process.env.PORTLESS_HTTPS;
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.PORTLESS_HTTPS;
+    } else {
+      process.env.PORTLESS_HTTPS = originalEnv;
+    }
+  });
+
+  it("returns true when PORTLESS_HTTPS is '0'", () => {
+    process.env.PORTLESS_HTTPS = "0";
+    expect(isHttpsEnvDisabled()).toBe(true);
+  });
+
+  it("returns true when PORTLESS_HTTPS is 'false'", () => {
+    process.env.PORTLESS_HTTPS = "false";
+    expect(isHttpsEnvDisabled()).toBe(true);
+  });
+
+  it("returns false when PORTLESS_HTTPS is '1'", () => {
+    process.env.PORTLESS_HTTPS = "1";
+    expect(isHttpsEnvDisabled()).toBe(false);
+  });
+
+  it("returns false when PORTLESS_HTTPS is unset", () => {
+    delete process.env.PORTLESS_HTTPS;
+    expect(isHttpsEnvDisabled()).toBe(false);
   });
 });
 
@@ -374,7 +436,7 @@ describe("injectFrameworkFlags", () => {
 
   // Package runner support (issue #146: bunx --bun vite dev gives 502)
 
-  // -- Simple runners (npx, bunx, pnpx) --
+  // Simple runners (npx, bunx, pnpx)
 
   it("injects flags for bunx vite dev", () => {
     const args = ["bunx", "vite", "dev"];
@@ -453,7 +515,7 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
-  // -- Subcommand runners (yarn dlx/exec, pnpm dlx/exec) --
+  // Subcommand runners (yarn dlx/exec, pnpm dlx/exec)
 
   it("injects flags for yarn dlx vite dev", () => {
     const args = ["yarn", "dlx", "vite", "dev"];
@@ -509,7 +571,7 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
-  // -- Implicit bin (yarn <framework>) --
+  // Implicit bin (yarn <framework>)
 
   it("injects flags for yarn vite (implicit bin)", () => {
     const args = ["yarn", "vite", "dev"];
@@ -526,7 +588,7 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
-  // -- Runner with multiple flags --
+  // Runner with multiple flags
 
   it("skips multiple runner flags before framework", () => {
     const args = ["npx", "--yes", "--quiet", "vite", "dev"];
@@ -545,7 +607,7 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
-  // -- Runner + --port / --host already present --
+  // Runner + --port / --host already present
 
   it("skips --port when already present via runner", () => {
     const args = ["bunx", "vite", "dev", "--port", "3000"];
@@ -575,7 +637,7 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["bunx", "--bun", "vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
   });
 
-  // -- Negative cases: runner with non-framework commands --
+  // Negative cases: runner with non-framework commands
 
   it("does not inject for bunx with non-framework command", () => {
     const args = ["bunx", "--bun", "next", "dev"];
@@ -601,7 +663,7 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["pnpm", "run", "vite", "dev"]);
   });
 
-  // -- Edge cases --
+  // Edge cases
 
   it("does not inject when runner has only flags and no command", () => {
     const args = ["bunx", "--bun"];
@@ -715,7 +777,7 @@ describe("buildProxyStartConfig", () => {
       })
     ).toEqual({
       effectiveTld: "local",
-      args: ["--lan", INTERNAL_LAN_IP_FLAG, "192.168.1.42"],
+      args: ["--no-tls", "--lan", INTERNAL_LAN_IP_FLAG, "192.168.1.42"],
     });
   });
 
@@ -728,7 +790,7 @@ describe("buildProxyStartConfig", () => {
       })
     ).toEqual({
       effectiveTld: "test",
-      args: ["--tld", "test"],
+      args: ["--no-tls", "--tld", "test"],
     });
   });
 });

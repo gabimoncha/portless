@@ -16,12 +16,12 @@ Portless is configured through environment variables. No config files needed.
     <tr>
       <td>`PORTLESS_PORT`</td>
       <td>Proxy port</td>
-      <td>`1355`</td>
+      <td>`443` (HTTPS) / `80` (HTTP)</td>
     </tr>
     <tr>
       <td>`PORTLESS_HTTPS`</td>
-      <td>Set to `1` to always enable HTTPS</td>
-      <td>off</td>
+      <td>HTTPS on by default; set to `0` to disable (same as `--no-tls`)</td>
+      <td>on</td>
     </tr>
     <tr>
       <td>`PORTLESS_LAN`</td>

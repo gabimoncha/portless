@@ -840,4 +840,66 @@ describe("CLI", () => {
       expect(stdout.trim()).toBe("--name foo");
     });
   });
+
+  describe("proxy start/stop lifecycle", () => {
+    const TEST_PORT = 18355;
+    let tmpDir: string;
+
+    const proxyEnv = () => ({
+      PORTLESS_PORT: String(TEST_PORT),
+      PORTLESS_HTTPS: "0",
+      PORTLESS_STATE_DIR: tmpDir,
+    });
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-lifecycle-"));
+    });
+
+    afterEach(() => {
+      // Ensure proxy is stopped even if a test fails
+      run(["proxy", "stop"], { env: proxyEnv() });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("starts the proxy and stops it cleanly", () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      expect(start.stdout).toContain(`proxy started on port ${TEST_PORT}`);
+
+      const stop = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop.status).toBe(0);
+      expect(stop.stdout).toContain("Proxy stopped");
+    });
+
+    it("reports not running when stopped twice", () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+
+      const stop1 = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop1.status).toBe(0);
+
+      const stop2 = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop2.stdout).toContain("not running");
+    });
+
+    it("detects an already-running proxy on start", () => {
+      const start1 = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start1.status).toBe(0);
+
+      const start2 = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start2.stdout).toContain("already running");
+    });
+
+    it("stops proxy using explicit -p flag instead of env var", () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+
+      // Stop without PORTLESS_PORT, using -p instead
+      const stop = run(["proxy", "stop", "-p", String(TEST_PORT)], {
+        env: { PORTLESS_HTTPS: "0", PORTLESS_STATE_DIR: tmpDir },
+      });
+      expect(stop.status).toBe(0);
+      expect(stop.stdout).toContain("Proxy stopped");
+    });
+  });
 });
