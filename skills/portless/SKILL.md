@@ -192,7 +192,7 @@ LAN mode depends on the system mDNS helpers that portless launches: macOS includ
 | `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                        |
 | `portless hosts clean`                 | Remove portless entries from /etc/hosts                        |
 | `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment        |
-| `portless <name> --force <cmd>`        | Override an existing route registered by another process       |
+| `portless <name> --force <cmd>`        | Kill the existing process and take over its route              |
 | `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child    |
 | `portless --help` / `-h`               | Show help                                                      |

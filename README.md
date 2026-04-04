@@ -196,7 +196,7 @@ portless proxy stop              # Stop the proxy
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --wildcard                       Allow unregistered subdomains to fall back to parent route
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
---force                          Override a route registered by another process
+--force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
 
