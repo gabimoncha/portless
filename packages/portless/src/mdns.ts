@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
-const { lanNetwork } = require("lan-network") as typeof import("lan-network");
+import { getLocalNetworkIp } from "./lan-ip.js";
+
+export { getLocalNetworkIp };
 
 type MdnsPublisher = {
   command: string;
@@ -63,22 +63,6 @@ function hasCommand(command: string, probeArgs: string[]): boolean {
     windowsHide: true,
   });
   return (result.error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT";
-}
-
-/**
- * Detect the local network IP address.
- * Returns the default LAN IPv4 address, or null if the machine appears offline.
- */
-export async function getLocalNetworkIp(): Promise<string | null> {
-  try {
-    const assignment = await lanNetwork();
-    if (assignment.internal || assignment.address === "127.0.0.1") {
-      return null;
-    }
-    return assignment.address;
-  } catch {
-    return null;
-  }
 }
 
 /**

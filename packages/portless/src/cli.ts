@@ -554,7 +554,6 @@ function startProxyServer(
     if (redirectServer) {
       redirectServer.close();
     }
-    if (activeLanIp) cleanupMdns();
     try {
       fs.unlinkSync(store.pidPath);
     } catch {
